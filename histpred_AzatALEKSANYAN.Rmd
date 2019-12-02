@@ -1,0 +1,322 @@
+---
+title: "Biostatistique - Histology Prediction"
+author: "Azat ALEKSANYAN"
+date: "12/2/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+\newpage
+
+# Introduction
+
+The object of thes report is to predict histology of the patients by genotypes. The analysis was done by using the following methods : *logistic regression*, as well as *lasso*, *ridge* and *elastic net*.
+
+In this report, you will find the analysis and explication of cancer prediction. For the report, Histology variable was used for training and testing. In general, **Histology** is the study of the microanatomy of cells, tissues, and organs as seen through a microscope. It examines the correlation between structure and function.
+
+In Histology column we have two cancer phenotypes (tissues) : **TCGA-LUAD** */ The Cancer Genome Atlas Lung Adenocarcinoma /* and **TCGA-LUSC** */ The Cancer Genome Atlas Lung Squamous Cell Carcinoma /*. These are data collections, which are part of a larger effort to build a research community focused on connecting cancer phenotypes to genotypes.
+
+\newpage
+
+# Importaion and Data Management
+
+```{r}
+d <- readRDS("data_learn.rds")
+for ( v in c("sex", "tissue_status", "histology", "os_months", "dead", "dead_at_24_months", "t", "n", "m", "tnm_stage", "tnm_grade") ) {
+    d[[ v ]] <- as.factor(x = d[[ v ]])
+}
+head(d[1:13])
+
+test <- readRDS("data_test_histology.rds")
+for ( v in c("sex", "tissue_status", "histology", "os_months", "dead", "dead_at_24_months", "t", "n", "m", "tnm_stage", "tnm_grade") ) {
+    test[[ v ]] <- as.factor(x = test[[ v ]])
+}
+```
+
+Here, we find some general information about patients as demographics as well as some information about the illness progress during some observations. 
+
+```{r message=FALSE,warning=FALSE}
+# only one value in tissue_status
+levels(d$tissue_status)
+
+# plenty of missing values in dead_at_24_months and tnm_grade
+countNA.col<-c()
+for(i in 1:ncol(d)){
+  countNA.col[i]<-sum(is.na(d[,i]))
+}
+names(d[,which(countNA.col>100)])
+
+d<-d[,-which(countNA.col>100)]
+test<-test[,-which(countNA.col>100)]
+
+# deleting these 2 variables in test and d datasets
+d<- d[,-which(colnames(d)=="tissue_status")]
+test<- test[,-which(colnames(test)=="tissue_status")]
+
+###### some cleaning and variable adding ###### 
+# changing - /hyphen/ to _ /underscore/ to evite possible errors
+require(stringr)
+names(d)<-str_replace_all(names(d), "-", "_")
+
+# extracting only genes names
+gs = colnames(d)[10:ncol(d)]
+```
+
+After exploring the data, a decision was made to delete the variables *tumoral* as there is only one value for all the observations (so there is no specific dependancy) as well as *dead_at_24_months* and *tnm_grade* which mostly consist of NA values. 
+
+Our dataset consists of 546 observations of 1000 genes. Because of dimension difficulties we should do several variable selections. First selection will be done with the help of Wald test. The Wald test (also called the Wald Chi-Squared Test) is a way to find out if explanatory variables in a model are significant. “Significant” means that they add something to the model; variables that add nothing can be deleted without affecting the model in any meaningful way. So we test the following hypothesis:
+
+$$H_0 : \beta_k = 0 \quad \text{vs} \quad H_1:\beta_k \ne 0$$
+
+\newpage
+
+# First Model : Logistic Regression
+
+To perform Wald test, we will test each of the variables and take into consideration the variables with the lowest *p-value*. Here Logistic Regression will be our first method to be tested in prediction accuracy. Logistic Regression's output gives us the desired Wald test's *p-value*.
+
+```{r}
+
+res<- sapply(gs, function(g) {
+  m = glm(d$histology~d[[g]], 
+    family = binomial(logit))
+  b = m$coefficients[[2]]
+  if (nrow(summary(m)$coefficients)==1){pv=1} # designed for the variables who has the same one value 
+  else {pv = summary(m)$coefficients[2,4]}
+  c(pval = pv,beta = b)
+})
+
+res = t(res)
+res = as.data.frame(res)
+
+
+```
+
+In the dataframe *res* we have *p-values* and $\beta$-s for each gene. Let's visualize what we have.
+
+```{r}
+plot(res$beta, -log10(res$pval), main="volcano plot", xlab = "", ylab = "")
+abline(h=30, col=2, lwd=2)
+```
+
+As we know, the higher the points are in the volcano plot, the better explainatory variables they are. So, let's try and subset our initial dataset with 30 genes data, which have the lowest *p-value*. 
+
+```{r}
+genes.selected<-c()
+for (i in 1:30){
+  genes.selected[i]<-rownames(res)[which(res$pval==sort(res$pval)[i])]
+}
+print(genes.selected)
+```
+
+These are the genes that Wald test says to be the most significant ones. As mentioned above, several variable selection should be performed. So, it's time for the second selection, for which **stepwise** variable selection method was used. Let's proceed with constructing the first model construction and second variable selection.
+
+```{r}
+# making a formula with all the variables to make manipulation easier
+f.1<-as.formula(paste('~',paste(genes.selected,collapse='+')))
+
+# first model
+model<-glm(histology~LINC02428,
+           data=d,
+           family=binomial(logit))
+
+# selection of variables
+step.out<-step(model,scope=f.1,direction = 'both', trace = 0)
+```
+
+So, with the stepwise variable selection, we already have a model with the lowist AIC = `r round(step.out$aic,4)`. We reduced the variables from 30 to 15 now. Let's directly construct a model with it and test prediction accuracy.
+
+```{r}
+# making a formula with all the variables to make manipulation easier
+f.2<-as.formula(paste(c('histology ~',paste(names(step.out$model)[-1],collapse = '+'))))
+
+# second and final model
+model<-glm(formula = f.2,
+           data = d,
+           family=binomial(logit))
+```
+
+## Prediction
+
+```{r}
+pred <- predict.glm(object = model, newdata = test, type = "response")
+idx  <- pred <= 0.5
+pred[  idx ] <- levels(x = d$histology)[ 1 ]
+pred[ !idx ] <- levels(x = d$histology)[ 2 ]
+table(pred, useNA = "ifany")
+```
+
+Here we received score of on Codalab **0.94**, so that accuracy of the prediction of *test* dataset is **94%**, which is very good result.
+
+## General information about significant genes
+
+- **SERPINB5** : is a Protein Coding gene. Diseases associated with SERPINB5 include Syringoma and Bone Squamous Cell Carcinoma. Among its related pathways are Apoptosis and Autophagy and DNA Damage Response. Gene Ontology (GO) annotations related to this gene include serine-type endopeptidase inhibitor activity. 
+- **WDPCP** : is a Protein Coding gene. Diseases associated with WDPCP include Congenital Heart Defects, Hamartomas Of Tongue, And Polysyndactyly and Bardet-Biedl Syndrome 15.
+- **TMEM189** : is a Protein Coding gene. Diseases associated with TMEM189 include Rocuronium Allergy and Chlorhexidine Allergy. Gene Ontology (GO) annotations related to this gene include ubiquitin protein ligase binding and ubiquitin-like protein transferase activity.
+- **SNCA** : is a Protein Coding gene. Diseases associated with SNCA include Dementia, Lewy Body and Parkinson Disease 1, Autosomal Dominant. Among its related pathways are Respiratory electron transport, ATP synthesis by chemiosmotic coupling, and heat production by uncoupling proteins. and Proteolysis Role of Parkin in the Ubiquitin-Proteasomal Pathway. Gene Ontology (GO) annotations related to this gene include calcium ion binding and enzyme binding. 
+- **CDHR1** :  is a Protein Coding gene. Diseases associated with CDHR1 include Cone-Rod Dystrophy 15 and Fundus Dystrophy. Gene Ontology (GO) annotations related to this gene include calcium ion binding.
+- **SPDEF** : is a Protein Coding gene. Diseases associated with SPDEF include Prostate Cancer. Among its related pathways are Regulation of Androgen receptor activity. Gene Ontology (GO) annotations related to this gene include DNA-binding transcription factor activity and DNA-binding transcription factor activity, RNA polymerase II-specific.
+- **LINC01503** : is an RNA Gene, and is affiliated with the lncRNA class. Diseases associated with LINC01503 include Tongue Squamous Cell Carcinoma and Squamous Cell Carcinoma.
+- **SAE1** : is a Protein Coding gene. Diseases associated with SAE1 include Adult Dermatomyositis. Among its related pathways are SUMOylation and Ubiquitin mediated proteolysis. Gene Ontology (GO) annotations related to this gene include protein heterodimerization activity and enzyme activator activity.
+- **GSK3B** : is a Protein Coding gene. Diseases associated with GSK3B include Alzheimer Disease and Usher Syndrome, Type Iia. Among its related pathways are Role of Calcineurin-dependent NFAT signaling in lymphocytes and Transcription Androgen Receptor nuclear signaling. Gene Ontology (GO) annotations related to this gene include transferase activity, transferring phosphorus-containing groups and protein tyrosine kinase activity.
+- **KPNA1** : is a Protein Coding gene. Diseases associated with KPNA1 include Human Immunodeficiency Virus Type 1. Among its related pathways are Interferon gamma signaling and Apoptotic cleavage of cellular proteins. Gene Ontology (GO) annotations related to this gene include binding and nuclear localization sequence binding.
+- **SMC6** : is a Protein Coding gene. Among its related pathways are SUMOylation and Metabolism of proteins.
+- **CCAT1** : is an RNA Gene, and is affiliated with the lncRNA class. Diseases associated with CCAT1 include Intrahepatic Cholangiocarcinoma and Ovarian Epithelial Cancer.
+- **FOXL2** : is a Protein Coding gene. Diseases associated with FOXL2 include Blepharophimosis, Ptosis, And Epicanthus Inversus and Premature Ovarian Failure 3. Gene Ontology (GO) annotations related to this gene include DNA-binding transcription factor activity and DNA-binding transcription factor activity, RNA polymerase II-specific.
+
+
+\newpage
+
+# Going deeper : alternative methods
+
+On Monday morning, we were introduced to  *lasso*, *ridge* and *elastic-net* technics during Data Mining. These technics are widely used for big dimensional problems, one of which is our case. So, let's have a quick view of these methods results.
+
+## Lasso 
+
+```{r message=FALSE, warning=FALSE}
+library(glmnet)
+y <- d$histology
+y = as.numeric(y == "TCGA-LUAD")
+x <- as.matrix(d[,10:1000])
+nn<- as.matrix(test[,10:1000])
+lambdas <- 10^seq(0.5, -3, by = -.1)
+```
+
+
+**glmnet** fits a generalized linear model via penalized maximum likelihood. The regularization path is computed for the lasso or elasticnet penalty at a grid of values for the regularization parameter lambda. Can deal with all shapes of data, including very large sparse data matrices. If $\alpha$ =1 it performs the lasso penalty, and  $\alpha$=0 - the ridge penalty
+
+**cv.glmnet** does k-fold cross-validation for glmnet, produces a plot, and returns a value for lambda
+
+```{r message=FALSE, warning=FALSE}
+# fitting a generalized linear model, method - LASSO
+fit <- glmnet(x, y, alpha = 1, lambda = lambdas, family = "binomial")
+
+# cross-validation for best lambda
+cv_fit <- cv.glmnet(x, y, alpha = 1, lambda = lambdas)
+
+# plot for best optimum lambda
+plot(cv_fit)
+
+# finding optimum lambd
+opt_lambda <- cv_fit$lambda.min
+
+
+# prediction
+fit <- glmnet(x, y, alpha = 1, lambda = opt_lambda, family = "binomial")
+test.n<-as.matrix(test[,10:ncol(test)])
+pred <- predict(fit, s = opt_lambda, newx = nn, type = "response")
+
+# transforming to vector 
+nam<-rownames(pred)
+tmp<-c(pred)
+names(tmp)=nam
+pred<-tmp
+
+### checking R square
+sst <- sum((y - mean(y))^2)
+sse <- sum((pred - y)^2)
+rsq <- 1 - sse / sst
+
+
+### to understand significant genes
+df.coef<-as.data.frame(as.matrix(coef(fit)))
+tmp<-as.data.frame(cbind(df.coef, rownames(df.coef)))[-1,]
+colnames(tmp)<-c("s0", "genes")
+
+sign<-tmp[tmp$s0 !=0,]
+
+# The genes which are perfectly predict histology
+as.vector(sign$genes)
+```
+
+As the score of 0.97 in Codalab. The prediction was made using `r nrow(sign)` genes information. On the train data the R-squared is $R^2$ = `r abs(round(rsq, 4))` with optimal $\lambda$ = `r opt_lambda` and of course $\alpha$ = 1 for *lasso* method, which is very good accuracy for train data.
+
+As the coding is mainly repeats, the explanations of the code will be avoided. 
+
+## Ridge
+
+The same coding, just with one change : $\alpha$ = 0
+
+```{r}
+y <- d$histology
+y = as.numeric(y == "TCGA-LUAD")
+x <- as.matrix(d[,10:1000])
+nn<- as.matrix(test[,10:1000])
+lambdas <- 10^seq(3, -2, by = -.1)
+
+fit <- glmnet(x, y, alpha = 0, lambda = lambdas, family = "binomial")
+
+cv_fit <- cv.glmnet(x, y, alpha = 0, lambda = lambdas)
+
+plot(cv_fit)
+
+opt_lambda <- cv_fit$lambda.min
+
+fit <- cv_fit$glmnet.fit
+test.n<-as.matrix(test[,10:ncol(test)])
+pred <- predict(fit, s = opt_lambda, newx = nn, type = "response")
+
+# nam<-rownames(pred)
+# tmp<-c(pred)
+# names(tmp)=nam
+# pred<-tmp
+```
+
+Score in Codalab is 1. This is not a surprise, as firstly the test data is not very big, and secondly ridge does not eliminate variables. So we have, 100% percent prediction using *Ridge* method. 
+
+## Elastic net
+
+Function **train** of **caret** package sets up a grid of tuning parameters for a number of classification and regression routines, fits each model and calculates a resampling based performance measure. 
+
+```{r message=FALSE, warning=FALSE}
+y<-as.factor(y)
+tmp<-cbind(y, x)
+
+# parameter tuning
+require(caret)
+model <- train(
+  y ~., data = tmp, method = "glmnet",
+  trControl = trainControl("cv", number = 10),
+  tuneLength = 10
+)
+
+# Best tuning parameter
+bestpar<-model$bestTune
+
+# final fitting
+fit <- glmnet(x, y, alpha = bestpar$alpha, lambda = bestpar$lambda, family = "binomial")
+test.n<-as.matrix(test[,10:ncol(test)])
+pred <- predict(fit, s = bestpar$lambda, newx = nn, type = "response")
+
+# transforming to vector 
+nam<-rownames(pred)
+tmp<-c(pred)
+names(tmp)=nam
+pred<-tmp
+
+### to understand significant genes ###
+coefs<-coef(model$finalModel, model$bestTune$lambda)
+df.coef<-as.data.frame(as.matrix(coefs))
+tmp<-as.data.frame(cbind(df.coef, rownames(df.coef)))[-1,]
+colnames(tmp)<-c("s0", "genes")
+
+sign<-tmp[tmp$s0 !=0,]
+
+# The genes which are perfectly predict histology
+nrow(sign)
+```
+Concerning the *elastic-net*, the hyperparametres $\alpha$ and $\lambda$ were optimized using *caret* package of R. So for the best prediction $\alpha$ = `r bestpar$alpha` and $\lambda$ = `r bestpar$lambda`. 
+
+In codalab score is 0.99. The prediction of histology was done using `r nrow(sign)` gene data. So almost sure prediction. The strange case is that elastic net gives worse (1%) than ridge, at the same time when its parametres were optimized. 
+
+Thank you for the attention.
+
+Main sources used for the report
+
+- https://www.wikipedia.org/ \newline
+
+- https://www.genecards.org/ \newline
+
+- http://www.sthda.com/ \newline
